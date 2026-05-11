@@ -4,6 +4,7 @@ type IconName =
   | 'arrow-left'
   | 'arrow-up'
   | 'attach'
+  | 'bell'
   | 'check'
   | 'chevron-down'
   | 'chevron-left'
@@ -14,7 +15,9 @@ type IconName =
   | 'download'
   | 'draw'
   | 'edit'
+  | 'external-link'
   | 'eye'
+  | 'eye-off'
   | 'file'
   | 'file-code'
   | 'folder'
@@ -27,6 +30,7 @@ type IconName =
   | 'link'
   | 'mic'
   | 'minus'
+  | 'orbit'
   | 'pencil'
   | 'plus'
   | 'play'
@@ -44,6 +48,7 @@ type IconName =
   | 'sun-moon'
   | 'tweaks'
   | 'upload'
+  | 'trash'
   | 'zoom-in'
   | 'zoom-out';
 
@@ -91,6 +96,13 @@ export function Icon({ name, size = 14, strokeWidth = 1.6, ...rest }: Props) {
       return (
         <svg {...common}>
           <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        </svg>
+      );
+    case 'bell':
+      return (
+        <svg {...common}>
+          <path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
         </svg>
       );
     case 'check':
@@ -164,6 +176,23 @@ export function Icon({ name, size = 14, strokeWidth = 1.6, ...rest }: Props) {
         <svg {...common}>
           <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
           <circle cx="12" cy="12" r="3" />
+        </svg>
+      );
+    case 'eye-off':
+      return (
+        <svg {...common}>
+          <path d="m3 3 18 18" />
+          <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
+          <path d="M9.9 4.2A9.9 9.9 0 0 1 12 4c6.5 0 10 8 10 8a17.8 17.8 0 0 1-2.1 3.1" />
+          <path d="M6.1 6.1C3.5 7.9 2 12 2 12s3.5 8 10 8a9.9 9.9 0 0 0 4.2-.9" />
+        </svg>
+      );
+    case 'external-link':
+      return (
+        <svg {...common}>
+          <path d="M15 3h6v6" />
+          <path d="M10 14 21 3" />
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
         </svg>
       );
     case 'file':
@@ -259,6 +288,24 @@ export function Icon({ name, size = 14, strokeWidth = 1.6, ...rest }: Props) {
       return (
         <svg {...common}>
           <path d="M5 12h14" />
+        </svg>
+      );
+    case 'orbit':
+      // Tilted elliptical orbit + central body + a small satellite riding the
+      // path. Reads unmistakably as "orbit/automation" rather than the
+      // generic refresh loop, and the rotated ellipse keeps the silhouette
+      // distinct from `refresh` and `reload` at small sizes.
+      return (
+        <svg {...common}>
+          <ellipse
+            cx="12"
+            cy="12"
+            rx="9"
+            ry="3.5"
+            transform="rotate(-25 12 12)"
+          />
+          <circle cx="12" cy="12" r="2.25" fill="currentColor" stroke="none" />
+          <circle cx="16" cy="6.8" r="1.5" fill="currentColor" stroke="none" />
         </svg>
       );
     case 'pencil':
@@ -418,6 +465,14 @@ export function Icon({ name, size = 14, strokeWidth = 1.6, ...rest }: Props) {
           <circle cx="11" cy="11" r="7" />
           <path d="M8 11h6" />
           <path d="m21 21-4.3-4.3" />
+        </svg>
+      );
+    case 'trash':
+      return (
+        <svg {...common}>
+          <path d="M3 6h18" />
+          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
         </svg>
       );
     default:

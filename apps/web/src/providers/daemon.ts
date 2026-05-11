@@ -19,10 +19,111 @@ import type {
   ChatSseEvent,
   ChatSseStartPayload,
   DaemonAgentPayload,
+  ResearchOptions,
   SseErrorPayload,
 } from '@open-design/contracts';
 import type { StreamHandlers } from './anthropic';
+
+/**
+ * Returns the front-end carrier that's about to send this request:
+ * - 'desktop' when running inside the Electron shell
+ * - 'web' when running in a regular browser
+ * - 'unknown' in non-browser test environments (jsdom without a UA)
+ *
+ * The daemon uses this to label telemetry traces. Cheap, called once per
+ * run so caching isn't worth the complexity.
+ */
+function detectClientType(): 'desktop' | 'web' | 'unknown' {
+  if (typeof navigator === 'undefined') return 'unknown';
+  const ua = navigator.userAgent ?? '';
+  if (ua.includes('Electron/')) return 'desktop';
+  if (ua) return 'web';
+  return 'unknown';
+}
 import { parseSseFrame } from './sse';
+
+const MAX_TRANSCRIPT_MESSAGE_CHARS = 12_000;
+const LARGE_TOOL_RESULT_CHARS = 8_000;
+const HIGH_INPUT_TOKEN_WARNING_THRESHOLD = 200_000;
+
+export function latestUserPromptFromHistory(history: ChatMessage[]): string {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const message = history[i];
+    if (message?.role === 'user') return message.content;
+  }
+  return '';
+}
+
+function truncateForTranscript(content: string): string {
+  if (content.length <= MAX_TRANSCRIPT_MESSAGE_CHARS) return content;
+  const omitted = content.length - MAX_TRANSCRIPT_MESSAGE_CHARS;
+  return `${content.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)}\n\n[Open Design truncated ${omitted} chars from this prior message before sending it to the agent. Full content remains in persisted history.]`;
+}
+
+function compactInput(input: unknown): string {
+  if (typeof input === 'string') return input;
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
+}
+
+function buildPriorRunContextWarning(history: ChatMessage[]): string | null {
+  let highestInputTokens = 0;
+  let largeToolResults = 0;
+  let sawAgentBrowserCoreDump = false;
+
+  for (const message of history) {
+    for (const event of message.events ?? []) {
+      if (event.kind === 'usage' && typeof event.inputTokens === 'number') {
+        highestInputTokens = Math.max(highestInputTokens, event.inputTokens);
+      }
+      if (event.kind === 'tool_result') {
+        if (event.content.length > LARGE_TOOL_RESULT_CHARS) largeToolResults += 1;
+        if (
+          event.content.includes('agent-browser skills get core') ||
+          event.content.includes('Agent Browser Core') ||
+          event.content.includes('name: core')
+        ) {
+          sawAgentBrowserCoreDump = true;
+        }
+      }
+      if (event.kind === 'tool_use') {
+        const input = compactInput(event.input);
+        if (input.includes('agent-browser skills get core')) {
+          sawAgentBrowserCoreDump = true;
+        }
+      }
+    }
+  }
+
+  const notes: string[] = [];
+  if (highestInputTokens >= HIGH_INPUT_TOKEN_WARNING_THRESHOLD) {
+    notes.push(`a previous run reported ${highestInputTokens} input tokens`);
+  }
+  if (largeToolResults > 0) {
+    notes.push(`${largeToolResults} large prior tool result${largeToolResults === 1 ? '' : 's'} exist only in persisted event history`);
+  }
+  if (sawAgentBrowserCoreDump) {
+    notes.push('agent-browser documentation output was seen earlier; do not replay it into this turn');
+  }
+  if (notes.length === 0) return null;
+
+  return [
+    '## context warning',
+    `Open Design detected ${notes.join(', ')}.`,
+    'Keep this turn compact: summarize prior tool output, read large references from temp files, and quote only task-relevant lines.',
+  ].join('\n');
+}
+
+export function buildDaemonTranscript(history: ChatMessage[]): string {
+  const transcript = history
+    .map((m) => `## ${m.role}\n${truncateForTranscript(m.content.trim())}`)
+    .join('\n\n');
+  const warning = buildPriorRunContextWarning(history);
+  return warning ? `${warning}\n\n${transcript}` : transcript;
+}
 
 export interface DaemonStreamHandlers extends StreamHandlers {
   onAgentEvent: (ev: AgentEvent) => void;
@@ -46,6 +147,10 @@ export interface DaemonStreamOptions {
   assistantMessageId?: string | null;
   clientRequestId?: string | null;
   skillId?: string | null;
+  // Per-turn skill ids picked via the composer's @-mention popover. These
+  // are layered onto the system prompt for this run only and do not
+  // change the project's persistent `skillId`.
+  skillIds?: string[];
   designSystemId?: string | null;
   // Project-relative paths the user has staged for this turn. The
   // daemon resolves them inside the project folder, validates they
@@ -57,6 +162,7 @@ export interface DaemonStreamOptions {
   // options and falls back to the CLI default when missing.
   model?: string | null;
   reasoning?: string | null;
+  research?: ResearchOptions;
   initialLastEventId?: string | null;
   onRunCreated?: (runId: string) => void;
   onRunStatus?: (status: ChatRunStatus) => void;
@@ -84,11 +190,13 @@ export async function streamViaDaemon({
   assistantMessageId,
   clientRequestId,
   skillId,
+  skillIds,
   designSystemId,
   attachments,
   commentAttachments,
   model,
   reasoning,
+  research,
   initialLastEventId,
   onRunCreated,
   onRunStatus,
@@ -97,29 +205,37 @@ export async function streamViaDaemon({
   // Local CLIs are single-turn print-mode programs, so we collapse the whole
   // chat into one string. If this becomes too noisy for long histories, the
   // fix is to only include the final user turn.
-  const transcript = history
-    .map((m) => `## ${m.role}\n${m.content.trim()}`)
-    .join('\n\n');
+  const transcript = buildDaemonTranscript(history);
   const request: ChatRequest = {
     agentId,
     message: transcript,
+    currentPrompt: latestUserPromptFromHistory(history),
     projectId: projectId ?? null,
     conversationId: conversationId ?? null,
     assistantMessageId: assistantMessageId ?? null,
     clientRequestId: clientRequestId ?? null,
     skillId: skillId ?? null,
+    skillIds: Array.isArray(skillIds) ? skillIds : [],
     designSystemId: designSystemId ?? null,
     attachments: attachments ?? [],
     commentAttachments: commentAttachments ?? [],
     model: model ?? null,
     reasoning: reasoning ?? null,
+    ...(research ? { research } : {}),
   };
   const body = JSON.stringify(request);
 
   try {
     const createResp = await fetch('/api/runs', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // Tells the daemon which front-end carrier started the run so the
+        // telemetry trace can be tagged 'client:desktop' vs 'client:web'.
+        // The daemon falls back to a User-Agent sniff when this header is
+        // absent (e.g. third-party clients), so omitting it in tests is OK.
+        'X-OD-Client': detectClientType(),
+      },
       body,
     });
 
@@ -341,6 +457,15 @@ function isChatRunStatus(value: unknown): value is ChatRunStatus {
   return value === 'queued' || value === 'running' || value === 'succeeded' || value === 'failed' || value === 'canceled';
 }
 
+function normalizeToolInput(input: unknown): unknown {
+  if (input == null || typeof input !== 'object') return input;
+  const obj = input as Record<string, unknown>;
+  if ('filePath' in obj && typeof obj.filePath === 'string') {
+    return { ...obj, file_path: obj.filePath };
+  }
+  return input;
+}
+
 // Translate a raw `agent` SSE payload (what apps/daemon/src/claude-stream.ts emits)
 // into the UI's AgentEvent union. Keep this liberal — unknown types just
 // return null so the UI ignores them instead of rendering garbage.
@@ -351,7 +476,9 @@ function translateAgentEvent(data: DaemonAgentPayload): AgentEvent | null {
       kind: 'status',
       label: data.label,
       detail:
-        typeof data.model === 'string'
+        typeof data.detail === 'string'
+          ? data.detail
+          : typeof data.model === 'string'
           ? data.model
           : typeof data.ttftMs === 'number'
             ? `first token in ${Math.round((data.ttftMs as number) / 100) / 10}s`
@@ -367,8 +494,30 @@ function translateAgentEvent(data: DaemonAgentPayload): AgentEvent | null {
   if (t === 'thinking_start') {
     return { kind: 'status', label: 'thinking' };
   }
+  if (t === 'live_artifact') {
+    return {
+      kind: 'live_artifact',
+      action: data.action,
+      projectId: data.projectId,
+      artifactId: data.artifactId,
+      title: data.title,
+      refreshStatus: data.refreshStatus,
+    };
+  }
+  if (t === 'live_artifact_refresh') {
+    return {
+      kind: 'live_artifact_refresh',
+      phase: data.phase,
+      projectId: data.projectId,
+      artifactId: data.artifactId,
+      refreshId: data.refreshId,
+      title: data.title,
+      refreshedSourceCount: data.refreshedSourceCount,
+      error: data.error,
+    };
+  }
   if (t === 'tool_use' && typeof data.id === 'string' && typeof data.name === 'string') {
-    return { kind: 'tool_use', id: data.id, name: data.name, input: data.input ?? null };
+    return { kind: 'tool_use', id: data.id, name: data.name, input: normalizeToolInput(data.input) };
   }
   if (t === 'tool_result' && typeof data.toolUseId === 'string') {
     return {
